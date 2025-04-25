@@ -1,6 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 import os
 import shutil
 from uuid import uuid4
@@ -106,7 +106,6 @@ async def merge_pdf(files: List[UploadFile] = File(...)):
     total_size = 0
     file_details = []
     
-    # Validate and save uploaded files
     try:
         for file in files:
             # Validate file
@@ -174,7 +173,7 @@ async def merge_pdf(files: List[UploadFile] = File(...)):
         logger.info(f"Merge completed in {elapsed_time:.2f}s, output size: {output_size / (1024 * 1024):.2f}MB")
         
         return {
-            "message": "PDFs merged successfully", 
+            "message": "PDFs merged successfully",
             "file_path": str(output_path), 
             "session_id": session_id,
             "file_count": len(files),
@@ -182,7 +181,7 @@ async def merge_pdf(files: List[UploadFile] = File(...)):
             "output_size": output_size,
             "processing_time": elapsed_time
         }
-    
+        
     except HTTPException:
         # Clean up
         try:
@@ -203,7 +202,7 @@ async def merge_pdf(files: List[UploadFile] = File(...)):
         except:
             pass
         raise
-    
+        
     except Exception as e:
         logger.error(f"Error merging PDFs: {str(e)}", exc_info=True)
         
@@ -312,9 +311,9 @@ async def split_pdf(file: UploadFile = File(...), page_ranges: str = Form(None))
 
 @app.get("/api/download/{session_id}/{filename}")
 async def download_file(session_id: str, filename: str):
-    file_path = f"backend/results/{session_id}/{filename}"
+    file_path = RESULT_DIR / session_id / filename
     
-    if not os.path.exists(file_path):
+    if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
     
     # Determine the appropriate media type based on file extension
@@ -329,7 +328,7 @@ async def download_file(session_id: str, filename: str):
     
     logger.info(f"Serving file {filename} with media type {media_type}")
     
-    return FileResponse(path=file_path, filename=filename, media_type=media_type)
+    return FileResponse(path=str(file_path), filename=filename, media_type=media_type)
 
 @app.post("/api/pdf-to-word")
 async def convert_pdf_to_word(
