@@ -44,12 +44,17 @@ app.add_middleware(
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB per file
 MAX_TOTAL_SIZE = 50 * 1024 * 1024  # 50MB total
 ALLOWED_EXTENSIONS = ['.pdf']
-UPLOAD_DIR = Path("backend/uploads")
-RESULT_DIR = Path("backend/results")
+
+# Get the current working directory
+BASE_DIR = Path.cwd()
+
+# Define upload and result directories relative to the base directory
+UPLOAD_DIR = BASE_DIR / "uploads"
+RESULT_DIR = BASE_DIR / "results"
 
 # Create necessary directories
-UPLOAD_DIR.mkdir(exist_ok=True)
-RESULT_DIR.mkdir(exist_ok=True)
+UPLOAD_DIR.mkdir(exist_ok=True, parents=True)
+RESULT_DIR.mkdir(exist_ok=True, parents=True)
 
 @app.get("/")
 async def read_root():
