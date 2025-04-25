@@ -229,25 +229,30 @@ async def merge_pdf(files: List[UploadFile] = File(...)):
 
 @app.post("/api/split-pdf")
 async def split_pdf(file: UploadFile = File(...), page_ranges: str = Form(None)):
+    start_time = time.time()
+    
     if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Only PDF files are allowed")
     
     # Create a unique folder for this request
     session_id = str(uuid4())
-    upload_dir = f"backend/uploads/{session_id}"
-    result_dir = f"backend/results/{session_id}"
-    os.makedirs(upload_dir, exist_ok=True)
-    os.makedirs(result_dir, exist_ok=True)
+    upload_dir = UPLOAD_DIR / session_id
+    result_dir = RESULT_DIR / session_id
+    upload_dir.mkdir(exist_ok=True)
+    result_dir.mkdir(exist_ok=True)
     
-    file_path = f"{upload_dir}/{file.filename}"
+    file_path = upload_dir / file.filename
     
-    # Save uploaded file
     try:
+        # Validate and save uploaded file
+        await validate_pdf_file(file)
+        
+        # Save uploaded file
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         
         # Split PDF
-        pdf = pypdf.PdfReader(file_path)
+        pdf = pypdf.PdfReader(str(file_path))
         total_pages = len(pdf.pages)
         
         # Check if PDF is encrypted
@@ -275,11 +280,11 @@ async def split_pdf(file: UploadFile = File(...), page_ranges: str = Form(None))
                     for p in range(start, end + 1):
                         output.add_page(pdf.pages[p])
                     
-                    output_path = f"{result_dir}/split_{i+1}.pdf"
+                    output_path = result_dir / f"split_{i+1}.pdf"
                     with open(output_path, "wb") as output_file:
                         output.write(output_file)
                     
-                    result_files.append(output_path)
+                    result_files.append(str(output_path))
                 except Exception as e:
                     raise HTTPException(status_code=400, detail=f"Invalid page range: {page_range}")
         else:
@@ -293,20 +298,66 @@ async def split_pdf(file: UploadFile = File(...), page_ranges: str = Form(None))
                 
                 output.add_page(pdf.pages[i])
                 
-                output_path = f"{result_dir}/page_{i+1}.pdf"
+                output_path = result_dir / f"page_{i+1}.pdf"
                 with open(output_path, "wb") as output_file:
                     output.write(output_file)
                 
-                result_files.append(output_path)
+                result_files.append(str(output_path))
+        
+        elapsed_time = time.time() - start_time
+        logger.info(f"Split completed in {elapsed_time:.2f}s, created {len(result_files)} files")
         
         return {
             "message": "PDF split successfully", 
             "total_pages": total_pages,
             "result_files": result_files,
-            "session_id": session_id
+            "session_id": session_id,
+            "processing_time": elapsed_time
         }
     
+    except HTTPException:
+        # Clean up
+        try:
+            if upload_dir.exists():
+                for file in upload_dir.glob("*"):
+                    try:
+                        file.unlink()
+                    except:
+                        pass
+                upload_dir.rmdir()
+            if result_dir.exists():
+                for file in result_dir.glob("*"):
+                    try:
+                        file.unlink()
+                    except:
+                        pass
+                result_dir.rmdir()
+        except:
+            pass
+        raise
+        
     except Exception as e:
+        logger.error(f"Error splitting PDF: {str(e)}", exc_info=True)
+        
+        # Clean up
+        try:
+            if upload_dir.exists():
+                for file in upload_dir.glob("*"):
+                    try:
+                        file.unlink()
+                    except:
+                        pass
+                upload_dir.rmdir()
+            if result_dir.exists():
+                for file in result_dir.glob("*"):
+                    try:
+                        file.unlink()
+                    except:
+                        pass
+                result_dir.rmdir()
+        except:
+            pass
+        
         raise HTTPException(status_code=500, detail=f"Error splitting PDF: {str(e)}")
 
 @app.get("/api/download/{session_id}/{filename}")
