@@ -37,7 +37,8 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000",  # Local development
         "https://*.up.railway.app",  # Railway public domains
-        "https://pdf.railway.internal"  # Railway internal domain
+        "https://pdf.railway.internal",  # Railway internal domain
+        "https://pdfgadgets.webfalcons.pk/"
     ],
     allow_credentials=True,
     allow_methods=["*"],
