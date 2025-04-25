@@ -25,9 +25,7 @@ wheels/
 venv/
 ENV/
 
-# Files created during PDF processing
-uploads/
-results/
+
 
 # IDE specific files
 .idea/
