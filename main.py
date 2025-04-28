@@ -662,6 +662,93 @@ async def convert_pdf_to_word(
         
         raise HTTPException(status_code=500, detail=f"Error converting PDF to Word: {str(e)}")
 
+@app.post("/api/image-to-pdf")
+async def convert_images_to_pdf(
+    files: List[UploadFile] = File(...),
+    quality: str = Form("high"),
+    pageSize: str = Form("a4"),
+    orientation: str = Form("portrait")
+):
+    if not HAS_PIL:
+        raise HTTPException(status_code=500, detail="PIL/Pillow is not available")
+    
+    session_id = str(uuid4())
+    session_dir = Path("uploads") / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        # Save uploaded images
+        image_paths = []
+        for file in files:
+            if not file.content_type.startswith('image/'):
+                raise HTTPException(status_code=400, detail=f"File {file.filename} is not an image")
+            
+            file_path = session_dir / file.filename
+            with file_path.open("wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+            image_paths.append(file_path)
+        
+        # Convert images to PDF
+        output_filename = f"converted_{session_id}.pdf"
+        output_path = Path("results") / output_filename
+        
+        # Create PDF from images
+        images = []
+        for image_path in image_paths:
+            img = Image.open(image_path)
+            if orientation == "landscape" and img.width < img.height:
+                img = img.rotate(90, expand=True)
+            elif orientation == "portrait" and img.width > img.height:
+                img = img.rotate(-90, expand=True)
+            images.append(img)
+        
+        # Save first image as PDF
+        if images:
+            # Convert to RGB if necessary
+            if images[0].mode in ('RGBA', 'LA'):
+                background = Image.new('RGB', images[0].size, (255, 255, 255))
+                background.paste(images[0], mask=images[0].split()[-1])
+                images[0] = background
+            
+            # Set quality based on user selection
+            quality_map = {
+                "high": 100,
+                "medium": 75,
+                "low": 50
+            }
+            quality_value = quality_map.get(quality, 100)
+            
+            # Save as PDF
+            if len(images) == 1:
+                # If there's only one image, don't use append_images
+                images[0].save(
+                    output_path,
+                    "PDF",
+                    resolution=quality_value
+                )
+            else:
+                # If there are multiple images, use append_images
+                images[0].save(
+                    output_path,
+                    "PDF",
+                    resolution=quality_value,
+                    save_all=True,
+                    append_images=images[1:]
+                )
+        
+        return {
+            "url": f"/api/download/{session_id}/{output_filename}",
+            "filename": output_filename
+        }
+        
+    except Exception as e:
+        logger.error(f"Error converting images to PDF: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # Clean up uploaded files
+        for file in files:
+            file.file.close()
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True) 
