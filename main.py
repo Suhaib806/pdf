@@ -674,7 +674,9 @@ async def convert_images_to_pdf(
     
     session_id = str(uuid4())
     session_dir = Path("uploads") / session_id
+    result_dir = Path("results") / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
+    result_dir.mkdir(parents=True, exist_ok=True)
     
     try:
         # Save uploaded images
@@ -690,7 +692,7 @@ async def convert_images_to_pdf(
         
         # Convert images to PDF
         output_filename = f"converted_{session_id}.pdf"
-        output_path = Path("results") / output_filename
+        output_path = result_dir / output_filename
         
         # Create PDF from images
         images = []
@@ -737,7 +739,7 @@ async def convert_images_to_pdf(
                 )
         
         return {
-            "url": f"/api/download/{session_id}/{output_filename}",
+            "session_id": session_id,
             "filename": output_filename
         }
         
