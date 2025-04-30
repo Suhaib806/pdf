@@ -12,6 +12,7 @@ from pathlib import Path
 import fitz  # PyMuPDF
 import io
 import tempfile
+import zipfile
 
 # Try to import PIL but don't fail if it's not available
 try:
@@ -120,7 +121,7 @@ async def merge_pdf(files: List[UploadFile] = File(...)):
             total_size += file_size
             if total_size > MAX_TOTAL_SIZE:
                 raise HTTPException(status_code=400, 
-                                   detail=f"Total file size exceeds maximum limit of {MAX_TOTAL_SIZE / (1024 * 1024)}MB.")
+                                detail=f"Total file size exceeds maximum limit of {MAX_TOTAL_SIZE / (1024 * 1024)}MB.")
             
             # Save file
             file_path = upload_dir / file.filename
@@ -750,6 +751,103 @@ async def convert_images_to_pdf(
         # Clean up uploaded files
         for file in files:
             file.file.close()
+
+@app.post("/api/pdf-to-jpg")
+async def convert_pdf_to_jpg(
+    file: UploadFile = File(...),
+    quality: str = Form("high"),
+    dpi: int = Form(300)
+):
+    start_time = time.time()
+    
+    if not file.filename.lower().endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="Only PDF files are allowed")
+    
+    # Create a unique folder for this request
+    session_id = str(uuid4())
+    upload_dir = UPLOAD_DIR / session_id
+    result_dir = RESULT_DIR / session_id
+    upload_dir.mkdir(exist_ok=True)
+    result_dir.mkdir(exist_ok=True)
+    
+    file_path = upload_dir / file.filename
+    
+    try:
+        # Validate and save uploaded file
+        await validate_pdf_file(file)
+        
+        # Save uploaded file
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        # Convert PDF to images
+        pdf_document = fitz.open(str(file_path))
+        total_pages = len(pdf_document)
+        
+        if total_pages == 0:
+            raise HTTPException(status_code=400, detail="PDF file contains no pages")
+        
+        # Create a zip file to store all images
+        zip_path = result_dir / "converted_images.zip"
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for page_num in range(total_pages):
+                page = pdf_document[page_num]
+                pix = page.get_pixmap(matrix=fitz.Matrix(dpi/72, dpi/72))
+                
+                # Convert to PIL Image for quality control
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                
+                # Save image with quality settings
+                img_quality = 95 if quality == "high" else 75
+                img_path = result_dir / f"page_{page_num + 1}.jpg"
+                img.save(img_path, "JPEG", quality=img_quality)
+                
+                # Add to zip
+                zipf.write(img_path, f"page_{page_num + 1}.jpg")
+                
+                # Clean up individual image file
+                os.remove(img_path)
+        
+        pdf_document.close()
+        
+        # Get output file size
+        output_size = os.path.getsize(zip_path)
+        
+        elapsed_time = time.time() - start_time
+        logger.info(f"PDF to JPG conversion completed in {elapsed_time:.2f}s, output size: {output_size / (1024 * 1024):.2f}MB")
+        
+        return {
+            "message": "PDF converted to JPG successfully",
+            "filename": "converted_images.zip",
+            "session_id": session_id,
+            "total_pages": total_pages,
+            "output_size": output_size,
+            "processing_time": elapsed_time
+        }
+        
+    except Exception as e:
+        logger.error(f"Error converting PDF to JPG: {str(e)}", exc_info=True)
+        
+        # Clean up
+        try:
+            if upload_dir.exists():
+                for file in upload_dir.glob("*"):
+                    try:
+                        file.unlink()
+                    except:
+                        pass
+                upload_dir.rmdir()
+            if result_dir.exists():
+                for file in result_dir.glob("*"):
+                    try:
+                        file.unlink()
+                    except:
+                        pass
+                result_dir.rmdir()
+        except:
+            pass
+        
+        raise HTTPException(status_code=500, detail=f"Error converting PDF to JPG: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
