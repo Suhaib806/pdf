@@ -787,6 +787,35 @@ async def convert_pdf_to_jpg(
         if total_pages == 0:
             raise HTTPException(status_code=400, detail="PDF file contains no pages")
         
+        # Handle single page PDF
+        if total_pages == 1:
+            page = pdf_document[0]
+            pix = page.get_pixmap(matrix=fitz.Matrix(dpi/72, dpi/72))
+            
+            # Convert to PIL Image for quality control
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            
+            # Save image with quality settings
+            img_quality = 95 if quality == "high" else 75
+            img_path = result_dir / "converted.jpg"
+            img.save(img_path, "JPEG", quality=img_quality)
+            
+            # Get output file size
+            output_size = os.path.getsize(img_path)
+            
+            elapsed_time = time.time() - start_time
+            logger.info(f"PDF to JPG conversion completed in {elapsed_time:.2f}s, output size: {output_size / (1024 * 1024):.2f}MB")
+            
+            return {
+                "message": "PDF converted to JPG successfully",
+                "filename": "converted.jpg",
+                "session_id": session_id,
+                "total_pages": total_pages,
+                "output_size": output_size,
+                "processing_time": elapsed_time
+            }
+        
+        # Handle multi-page PDF
         # Create a zip file to store all images
         zip_path = result_dir / "converted_images.zip"
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
