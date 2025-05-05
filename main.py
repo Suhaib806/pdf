@@ -13,6 +13,7 @@ import fitz  # PyMuPDF
 import io
 import tempfile
 import zipfile
+from PIL import Image, ImageDraw, ImageFont
 
 # Try to import PIL but don't fail if it's not available
 try:
@@ -878,6 +879,125 @@ async def convert_pdf_to_jpg(
         
         raise HTTPException(status_code=500, detail=f"Error converting PDF to JPG: {str(e)}")
 
+@app.post("/api/powerpoint-to-pdf")
+async def convert_powerpoint_to_pdf(file: UploadFile = File(...)):
+    start_time = time.time()
+    
+    if not file.filename.lower().endswith(('.ppt', '.pptx')):
+        raise HTTPException(status_code=400, detail="Only PowerPoint files (.ppt, .pptx) are allowed")
+    
+    # Create a unique folder for this request
+    session_id = str(uuid4())
+    upload_dir = UPLOAD_DIR / session_id
+    result_dir = RESULT_DIR / session_id
+    upload_dir.mkdir(exist_ok=True)
+    result_dir.mkdir(exist_ok=True)
+    
+    file_path = upload_dir / file.filename
+    output_path = result_dir / f"{Path(file.filename).stem}.pdf"
+    
+    try:
+        # Validate and save uploaded file
+        await validate_powerpoint_file(file)
+        
+        # Save the uploaded file
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        try:
+            import comtypes.client
+            
+            # Create PowerPoint application object
+            logger.info("Starting PowerPoint application")
+            powerpoint = comtypes.client.CreateObject("Powerpoint.Application")
+            
+            # Set visibility to minimize
+            powerpoint.Visible = 1
+            
+            try:
+                # Open the PowerPoint presentation
+                logger.info(f"Opening presentation: {file_path}")
+                slides = powerpoint.Presentations.Open(str(file_path))
+                
+                # Save as PDF (formatType = 32)
+                logger.info(f"Converting to PDF: {output_path}")
+                slides.SaveAs(str(output_path), 32)
+                
+                # Close the presentation
+                slides.Close()
+                
+                # Quit PowerPoint
+                powerpoint.Quit()
+                
+                # Get output file size
+                output_size = os.path.getsize(output_path)
+                
+                elapsed_time = time.time() - start_time
+                logger.info(f"PowerPoint to PDF conversion completed in {elapsed_time:.2f}s, output size: {output_size / (1024 * 1024):.2f}MB")
+                
+                return FileResponse(
+                    path=output_path,
+                    filename=f"{Path(file.filename).stem}.pdf",
+                    media_type="application/pdf"
+                )
+                
+            except Exception as e:
+                # Make sure PowerPoint is closed even if there's an error
+                try:
+                    powerpoint.Quit()
+                except:
+                    pass
+                raise e
+            
+        except ImportError:
+            raise HTTPException(
+                status_code=500,
+                detail="Required Python package (comtypes) not installed"
+            )
+        
+    except Exception as e:
+        logger.error(f"Error converting PowerPoint to PDF: {str(e)}", exc_info=True)
+        
+        # Clean up
+        try:
+            if upload_dir.exists():
+                for file in upload_dir.glob("*"):
+                    try:
+                        file.unlink()
+                    except:
+                        pass
+                upload_dir.rmdir()
+            if result_dir.exists():
+                for file in result_dir.glob("*"):
+                    try:
+                        file.unlink()
+                    except:
+                        pass
+                result_dir.rmdir()
+        except:
+            pass
+        
+        raise HTTPException(status_code=500, detail=f"Error converting PowerPoint to PDF: {str(e)}")
+
+async def validate_powerpoint_file(file: UploadFile, max_size: int = MAX_FILE_SIZE) -> None:
+    """Validate PowerPoint file size and type."""
+    # Validate file extension
+    file_ext = os.path.splitext(file.filename)[1].lower()
+    if file_ext not in ['.ppt', '.pptx']:
+        raise HTTPException(status_code=400, detail="File type not allowed. Only .ppt and .pptx files are supported.")
+    
+    # Validate file size
+    file_size = 0
+    content = await file.read(1024 * 1024)  # Read 1MB chunks
+    while content:
+        file_size += len(content)
+        if file_size > max_size:
+            await file.seek(0)  # Reset file pointer
+            raise HTTPException(status_code=400, detail=f"File size exceeds maximum limit of {max_size / (1024 * 1024)}MB.")
+        content = await file.read(1024 * 1024)
+    
+    await file.seek(0)  # Reset file pointer for subsequent operations
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)  
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True) 
