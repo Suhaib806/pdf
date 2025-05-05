@@ -905,54 +905,65 @@ async def convert_powerpoint_to_pdf(file: UploadFile = File(...)):
             shutil.copyfileobj(file.file, buffer)
         
         try:
-            import comtypes.client
+            import subprocess
+            import platform
             
-            # Create PowerPoint application object
-            logger.info("Starting PowerPoint application")
-            powerpoint = comtypes.client.CreateObject("Powerpoint.Application")
+            # Determine the LibreOffice command based on the platform
+            if platform.system() == "Windows":
+                # For Windows, try to find LibreOffice in common installation paths
+                possible_paths = [
+                    r"C:\Program Files\LibreOffice\program\soffice.exe",
+                    r"C:\Program Files (x86)\LibreOffice\program\soffice.exe"
+                ]
+                soffice_cmd = None
+                for path in possible_paths:
+                    if os.path.exists(path):
+                        soffice_cmd = path
+                        break
+                if not soffice_cmd:
+                    raise Exception("LibreOffice not found. Please install LibreOffice.")
+            else:
+                # For Linux/Unix systems (including Railway)
+                soffice_cmd = "soffice"
             
-            # Set visibility to minimize
-            powerpoint.Visible = 1
+            # Run LibreOffice conversion
+            cmd = [
+                soffice_cmd,
+                "--headless",
+                "--convert-to", "pdf",
+                "--outdir", str(result_dir),
+                str(file_path)
+            ]
             
-            try:
-                # Open the PowerPoint presentation
-                logger.info(f"Opening presentation: {file_path}")
-                slides = powerpoint.Presentations.Open(str(file_path))
-                
-                # Save as PDF (formatType = 32)
-                logger.info(f"Converting to PDF: {output_path}")
-                slides.SaveAs(str(output_path), 32)
-                
-                # Close the presentation
-                slides.Close()
-                
-                # Quit PowerPoint
-                powerpoint.Quit()
-                
-                # Get output file size
-                output_size = os.path.getsize(output_path)
-                
-                elapsed_time = time.time() - start_time
-                logger.info(f"PowerPoint to PDF conversion completed in {elapsed_time:.2f}s, output size: {output_size / (1024 * 1024):.2f}MB")
-                
-                return FileResponse(
-                    path=output_path,
-                    filename=f"{Path(file.filename).stem}.pdf",
-                    media_type="application/pdf"
-                )
-                
-            except Exception as e:
-                # Make sure PowerPoint is closed even if there's an error
-                try:
-                    powerpoint.Quit()
-                except:
-                    pass
-                raise e
+            # Run the conversion command
+            process = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=True
+            )
             
-        except ImportError:
+            # Get output file size
+            output_size = os.path.getsize(output_path)
+            
+            elapsed_time = time.time() - start_time
+            logger.info(f"PowerPoint to PDF conversion completed in {elapsed_time:.2f}s, output size: {output_size / (1024 * 1024):.2f}MB")
+            
+            return FileResponse(
+                path=output_path,
+                filename=f"{Path(file.filename).stem}.pdf",
+                media_type="application/pdf"
+            )
+            
+        except subprocess.CalledProcessError as e:
             raise HTTPException(
                 status_code=500,
-                detail="Required Python package (comtypes) not installed"
+                detail=f"Conversion failed: {e.stderr}"
+            )
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error during conversion: {str(e)}"
             )
         
     except Exception as e:
