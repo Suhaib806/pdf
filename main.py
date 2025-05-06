@@ -894,7 +894,8 @@ async def convert_powerpoint_to_pdf(file: UploadFile = File(...)):
     result_dir.mkdir(exist_ok=True)
     
     file_path = upload_dir / file.filename
-    output_path = result_dir / f"{Path(file.filename).stem}.pdf"
+    output_filename = f"{Path(file.filename).stem}.pdf"
+    output_path = result_dir / output_filename
     
     try:
         # Validate and save uploaded file
@@ -913,7 +914,9 @@ async def convert_powerpoint_to_pdf(file: UploadFile = File(...)):
                 # For Windows, try to find LibreOffice in common installation paths
                 possible_paths = [
                     r"C:\Program Files\LibreOffice\program\soffice.exe",
-                    r"C:\Program Files (x86)\LibreOffice\program\soffice.exe"
+                    r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+                    r"C:\Program Files\LibreOffice\App\libreoffice\program\soffice.exe",
+                    r"C:\Program Files (x86)\LibreOffice\App\libreoffice\program\soffice.exe"
                 ]
                 soffice_cmd = None
                 for path in possible_paths:
@@ -921,9 +924,11 @@ async def convert_powerpoint_to_pdf(file: UploadFile = File(...)):
                         soffice_cmd = path
                         break
                 if not soffice_cmd:
-                    raise Exception("LibreOffice not found. Please install LibreOffice.")
+                    raise Exception(
+                        "LibreOffice not found. Please install LibreOffice from https://www.libreoffice.org/download/download/ "
+                        "and make sure it's installed in one of the standard locations."
+                    )
             else:
-                # For Linux/Unix systems (including Railway)
                 soffice_cmd = "soffice"
             
             # Run LibreOffice conversion
@@ -949,22 +954,29 @@ async def convert_powerpoint_to_pdf(file: UploadFile = File(...)):
             elapsed_time = time.time() - start_time
             logger.info(f"PowerPoint to PDF conversion completed in {elapsed_time:.2f}s, output size: {output_size / (1024 * 1024):.2f}MB")
             
-            return FileResponse(
-                path=output_path,
-                filename=f"{Path(file.filename).stem}.pdf",
-                media_type="application/pdf"
-            )
+            return {
+                "message": "PowerPoint converted to PDF successfully",
+                "session_id": session_id,
+                "filename": output_filename,
+                "processing_time": elapsed_time,
+                "output_size": output_size
+            }
             
         except subprocess.CalledProcessError as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Conversion failed: {e.stderr}"
+            error_msg = f"Conversion failed: {e.stderr}"
+            logger.error(error_msg)
+            raise HTTPException(status_code=500, detail=error_msg)
+        except FileNotFoundError as e:
+            error_msg = (
+                "LibreOffice not found. Please install LibreOffice from https://www.libreoffice.org/download/download/ "
+                "and make sure it's installed in one of the standard locations."
             )
+            logger.error(error_msg)
+            raise HTTPException(status_code=500, detail=error_msg)
         except Exception as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Error during conversion: {str(e)}"
-            )
+            error_msg = f"Error during conversion: {str(e)}"
+            logger.error(error_msg)
+            raise HTTPException(status_code=500, detail=error_msg)
         
     except Exception as e:
         logger.error(f"Error converting PowerPoint to PDF: {str(e)}", exc_info=True)
