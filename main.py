@@ -383,16 +383,12 @@ async def download_file(session_id: str, filename: str):
     
     return FileResponse(path=str(file_path), filename=filename, media_type=media_type)
 
-@app.post("/api/pdf-to-word")
-async def convert_pdf_to_word(
-    file: UploadFile = File(...),
-    format: str = Form("docx"),
-    preserve_formatting: str = Form("true")
-):
+@app.post("/api/word-to-pdf")
+async def convert_word_to_pdf(file: UploadFile = File(...)):
     start_time = time.time()
     
-    # Validate file
-    await validate_pdf_file(file)
+    if not file.filename.lower().endswith(('.doc', '.docx')):
+        raise HTTPException(status_code=400, detail="Only Word files (.doc, .docx) are allowed")
     
     # Create a unique folder for this request
     session_id = str(uuid4())
@@ -401,268 +397,105 @@ async def convert_pdf_to_word(
     upload_dir.mkdir(exist_ok=True)
     result_dir.mkdir(exist_ok=True)
     
-    # Save uploaded file
-    pdf_path = upload_dir / file.filename
-    with open(pdf_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-    
-    # Determine output format
-    output_format = format.lower()
-    if output_format not in ["docx", "doc"]:
-        output_format = "docx"  # Default to DOCX if invalid format
-    
-    # Determine if we should preserve formatting
-    preserve = preserve_formatting.lower() == "true"
-    
-    # Define output path
-    output_filename = f"converted.{output_format}"
-    output_path = result_dir / output_filename
+    file_path = upload_dir / file.filename
     
     try:
-        logger.info(f"Converting PDF to {output_format.upper()} with preserve_formatting={preserve}")
+        # Validate and save uploaded file
+        await validate_word_file(file)
         
-        # Open the PDF with PyMuPDF
-        pdf_document = fitz.open(str(pdf_path))
+        # Save the uploaded file
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
         
-        # Create a Word document
-        if output_format in ["docx", "doc"]:
-            try:
-                # Using python-docx for DOCX creation
-                from docx import Document
-                from docx.shared import Pt, Inches, Cm
-                from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
-                
-                document = Document()
-                
-                # Set default font and margin
-                style = document.styles['Normal']
-                style.font.name = 'Calibri'
-                style.font.size = Pt(11)
-                
-                sections = document.sections
-                for section in sections:
-                    section.page_height = Inches(11)
-                    section.page_width = Inches(8.5)
-                    section.left_margin = Inches(1)
-                    section.right_margin = Inches(1)
-                    section.top_margin = Inches(1)
-                    section.bottom_margin = Inches(1)
-                
-                # Process each page with better formatting
-                for page_num in range(len(pdf_document)):
-                    try:
-                        # Process current page
-                        page = pdf_document[page_num]
-                        
-                        # Add page number as heading if there are multiple pages
-                        if len(pdf_document) > 1:
-                            heading = document.add_heading(f'Page {page_num + 1}', level=2)
-                            heading.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
-                        
-                        # Alternative direct image extraction approach - gets all images from the page
-                        # regardless of their presence in text blocks
-                        if preserve:
-                            logger.info(f"Attempting direct image extraction for page {page_num + 1}")
-                            try:
-                                # Create a temporary image directory for this page
-                                direct_img_dir = Path(tempfile.mkdtemp(dir=upload_dir))
-                                
-                                # Get all images on the page
-                                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x resolution for quality
-                                png_path = direct_img_dir / f"page_{page_num}.png"
-                                pix.save(str(png_path))
-                                
-                                logger.info(f"Saved full page image to {png_path}")
-                                
-                                # Add the image to the document
-                                try:
-                                    document.add_picture(str(png_path), width=Cm(15))
-                                    logger.info(f"Added full page image to document")
-                                except Exception as img_err:
-                                    logger.warning(f"Failed to add full page image: {str(img_err)}")
-                                
-                                # Clean up
-                                try:
-                                    shutil.rmtree(direct_img_dir)
-                                except Exception:
-                                    pass
-                            except Exception as ex:
-                                logger.warning(f"Failed direct image extraction: {str(ex)}")
-                        
-                        # Extract text with more formatting information
-                        blocks = page.get_text("dict")["blocks"]
-                        
-                        # Create a temporary image directory for this page
-                        temp_img_dir = Path(tempfile.mkdtemp(dir=upload_dir))
-                        
-                        # Extract images from the page
-                        img_list = page.get_images(full=True)
-                        
-                        # Log how many images were found
-                        logger.info(f"Found {len(img_list)} images on page {page_num + 1}")
-                        
-                        # Dictionary to store image paths by their xref
-                        image_paths = {}
-                        
-                        # Save each image from this page
-                        for img_index, img_info in enumerate(img_list):
-                            xref = img_info[0]  # Image identifier
-                            
-                            try:
-                                # Extract image
-                                base_img = pdf_document.extract_image(xref)
-                                image_bytes = base_img["image"]
-                                image_ext = base_img["ext"]
-                                
-                                # Log image details
-                                logger.info(f"Extracted image {img_index} from page {page_num + 1}: xref={xref}, format={image_ext}, size={len(image_bytes)} bytes")
-                                
-                                # Save the image to the temp directory
-                                img_path = temp_img_dir / f"image_{page_num}_{img_index}.{image_ext}"
-                                with open(img_path, "wb") as img_file:
-                                    img_file.write(image_bytes)
-                                
-                                # Store the image path for reference
-                                image_paths[xref] = img_path
-                                
-                                # Optionally process the image with PIL if available
-                                if HAS_PIL and image_ext.lower() not in ['jpg', 'jpeg', 'png']:
-                                    try:
-                                        # Convert to a more Word-friendly format if needed
-                                        pil_img = Image.open(img_path)
-                                        # Save as PNG for better compatibility
-                                        png_path = temp_img_dir / f"image_{page_num}_{img_index}.png"
-                                        pil_img.save(png_path, "PNG")
-                                        image_paths[xref] = png_path
-                                        logger.info(f"Converted image to PNG for better compatibility")
-                                    except Exception as pil_error:
-                                        logger.warning(f"PIL image processing failed: {str(pil_error)}")
-                                        # Keep using original image
-                            except Exception as img_error:
-                                logger.warning(f"Error extracting image {xref}: {str(img_error)}")
-                        
-                        # Add images directly after processing blocks
-                        if img_list and preserve:
-                            logger.info(f"Adding images directly to document")
-                            for img_index, img_info in enumerate(img_list):
-                                xref = img_info[0]
-                                if xref in image_paths:
-                                    img_path = image_paths[xref]
-                                    try:
-                                        document.add_picture(str(img_path), width=Cm(15))
-                                        logger.info(f"Added image {img_index} to document directly")
-                                    except Exception as img_insert_error:
-                                        logger.warning(f"Could not insert image directly: {str(img_insert_error)}")
-                        
-                        # Process text blocks
-                        for block in blocks:
-                            # Check if this is a text block
-                            if block["type"] == 0:  # Type 0 is text
-                                # Extract lines of text from this block
-                                for line in block["lines"]:
-                                    text_line = " ".join([span["text"] for span in line["spans"]])
-                                    if text_line.strip():
-                                        # Check if this might be a heading
-                                        is_heading = False
-                                        for span in line["spans"]:
-                                            # If larger font size or bold, treat as heading
-                                            if span["size"] > 12 or "bold" in span.get("font", "").lower():
-                                                is_heading = True
-                                                break
-                                        
-                                        # Add the text with appropriate formatting
-                                        if is_heading:
-                                            p = document.add_paragraph()
-                                            run = p.add_run(text_line)
-                                            run.bold = True
-                                            run.font.size = Pt(14)
-                                        else:
-                                            document.add_paragraph(text_line)
-                            
-                            # Check if this is an image block
-                            elif block["type"] == 1:  # Type 1 is image
-                                if "xref" in block and block["xref"] in image_paths:
-                                    # Add the image to the document
-                                    img_path = image_paths[block["xref"]]
-                                    try:
-                                        document.add_picture(str(img_path), width=Cm(15))  # 15cm width, height auto
-                                        logger.info(f"Added image from block type 1 to document: xref={block['xref']}")
-                                    except Exception as img_insert_error:
-                                        logger.warning(f"Could not insert image from block: {str(img_insert_error)}")
-                        
-                        # Add page break between pages if not the last page
-                        if page_num < len(pdf_document) - 1:
-                            document.add_page_break()
-                        
-                        # Clean up temp image directory
-                        try:
-                            shutil.rmtree(temp_img_dir)
-                        except Exception as cleanup_error:
-                            logger.warning(f"Error cleaning up temporary images: {str(cleanup_error)}")
-                            
-                    except Exception as page_error:
-                        logger.warning(f"Error processing page {page_num+1}: {str(page_error)}")
-                        # Add a note about the error
-                        error_para = document.add_paragraph(f"[Error extracting content from page {page_num+1}]")
-                        error_para.italic = True
-                
-                # Save the document
-                try:
-                    document.save(str(output_path))
-                    logger.info(f"Successfully created Word document with text and images")
-                except Exception as save_error:
-                    logger.error(f"Error saving Word document: {str(save_error)}")
-                    raise Exception(f"Could not save Word document: {str(save_error)}")
-                
-            except ImportError as e:
-                logger.warning(f"Required libraries not installed: {str(e)}, falling back to basic text extraction")
-                # Fallback to basic text extraction
-                document = Document()
-                
-                for page_num in range(len(pdf_document)):
-                    page = pdf_document[page_num]
-                    text = page.get_text()
-                    
-                    if len(pdf_document) > 1:
-                        document.add_heading(f'Page {page_num + 1}', level=2)
-                    
-                    for paragraph in text.split('\n\n'):
-                        if paragraph.strip():
-                            document.add_paragraph(paragraph.strip())
-                    
-                    if page_num < len(pdf_document) - 1:
-                        document.add_page_break()
-                
-                document.save(str(output_path))
-                logger.info("Created Word document with basic text extraction only")
-                
-        # Close the PDF document
-        pdf_document.close()
+        # Convert Word to PDF using python-docx2pdf
+        output_path = result_dir / "converted.pdf"
+        
+        try:
+            from docx2pdf import convert
+            convert(str(file_path), str(output_path))
+        except ImportError:
+            raise HTTPException(
+                status_code=500,
+                detail="Word to PDF conversion is not available. Please ensure docx2pdf is installed."
+            )
         
         # Get output file size
         output_size = os.path.getsize(output_path)
         
         elapsed_time = time.time() - start_time
-        logger.info(f"Conversion completed in {elapsed_time:.2f}s, output size: {output_size / (1024 * 1024):.2f}MB")
+        logger.info(f"Word to PDF conversion completed in {elapsed_time:.2f}s, output size: {output_size / (1024 * 1024):.2f}MB")
         
         return {
-            "message": f"PDF converted to {output_format.upper()} successfully",
+            "message": "Word file converted to PDF successfully",
+            "file_path": str(output_path),
             "session_id": session_id,
-            "processing_time": elapsed_time,
             "output_size": output_size,
-            "format": output_format
+            "processing_time": elapsed_time
         }
-    
+        
+    except HTTPException:
+        # Clean up
+        try:
+            if upload_dir.exists():
+                for file in upload_dir.glob("*"):
+                    try:
+                        file.unlink()
+                    except:
+                        pass
+                upload_dir.rmdir()
+            if result_dir.exists():
+                for file in result_dir.glob("*"):
+                    try:
+                        file.unlink()
+                    except:
+                        pass
+                result_dir.rmdir()
+        except:
+            pass
+        raise
+        
     except Exception as e:
-        logger.error(f"Error converting PDF to Word: {str(e)}", exc_info=True)
+        logger.error(f"Error converting Word to PDF: {str(e)}", exc_info=True)
         
         # Clean up
-        if upload_dir.exists():
-            shutil.rmtree(upload_dir)
-        if result_dir.exists():
-            shutil.rmtree(result_dir)
+        try:
+            if upload_dir.exists():
+                for file in upload_dir.glob("*"):
+                    try:
+                        file.unlink()
+                    except:
+                        pass
+                upload_dir.rmdir()
+            if result_dir.exists():
+                for file in result_dir.glob("*"):
+                    try:
+                        file.unlink()
+                    except:
+                        pass
+                result_dir.rmdir()
+        except:
+            pass
         
-        raise HTTPException(status_code=500, detail=f"Error converting PDF to Word: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error converting Word to PDF: {str(e)}")
+
+async def validate_word_file(file: UploadFile, max_size: int = MAX_FILE_SIZE) -> None:
+    """Validate Word file size and type."""
+    # Validate file extension
+    file_ext = os.path.splitext(file.filename)[1].lower()
+    if file_ext not in ['.doc', '.docx']:
+        raise HTTPException(status_code=400, detail="File type not allowed. Only .doc and .docx files are supported.")
+    
+    # Validate file size
+    file_size = 0
+    content = await file.read(1024 * 1024)  # Read 1MB chunks
+    while content:
+        file_size += len(content)
+        if file_size > max_size:
+            await file.seek(0)  # Reset file pointer
+            raise HTTPException(status_code=400, detail=f"File size exceeds maximum limit of {max_size / (1024 * 1024)}MB.")
+        content = await file.read(1024 * 1024)
+    
+    await file.seek(0)  # Reset file pointer for subsequent operations
 
 @app.post("/api/image-to-pdf")
 async def convert_images_to_pdf(
