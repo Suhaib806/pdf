@@ -14,6 +14,7 @@ import io
 import tempfile
 import zipfile
 from PIL import Image, ImageDraw, ImageFont
+import subprocess
 
 # Try to import PIL but don't fail if it's not available
 try:
@@ -407,17 +408,71 @@ async def convert_word_to_pdf(file: UploadFile = File(...)):
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         
-        # Convert Word to PDF using python-docx2pdf
+        # Convert Word to PDF using LibreOffice
         output_path = result_dir / "converted.pdf"
         
         try:
-            from docx2pdf import convert
-            convert(str(file_path), str(output_path))
-        except ImportError:
-            raise HTTPException(
-                status_code=500,
-                detail="Word to PDF conversion is not available. Please ensure docx2pdf is installed."
+            import platform
+            
+            # Determine the LibreOffice command based on the platform
+            if platform.system() == "Windows":
+                # For Windows, try to find LibreOffice in common installation paths
+                possible_paths = [
+                    r"C:\Program Files\LibreOffice\program\soffice.exe",
+                    r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+                    r"C:\Program Files\LibreOffice\App\libreoffice\program\soffice.exe",
+                    r"C:\Program Files (x86)\LibreOffice\App\libreoffice\program\soffice.exe"
+                ]
+                soffice_cmd = None
+                for path in possible_paths:
+                    if os.path.exists(path):
+                        soffice_cmd = path
+                        break
+                if not soffice_cmd:
+                    raise Exception(
+                        "LibreOffice not found. Please install LibreOffice from https://www.libreoffice.org/download/download/ "
+                        "and make sure it's installed in one of the standard locations."
+                    )
+            else:
+                soffice_cmd = "soffice"
+            
+            # Run LibreOffice conversion
+            cmd = [
+                soffice_cmd,
+                "--headless",
+                "--convert-to", "pdf",
+                "--outdir", str(result_dir),
+                str(file_path)
+            ]
+            
+            # Run the conversion command
+            process = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=True
             )
+            
+            # Rename the output file to match our expected name
+            converted_file = result_dir / f"{file_path.stem}.pdf"
+            if converted_file.exists():
+                converted_file.rename(output_path)
+            
+        except subprocess.CalledProcessError as e:
+            error_msg = f"Conversion failed: {e.stderr}"
+            logger.error(error_msg)
+            raise HTTPException(status_code=500, detail=error_msg)
+        except FileNotFoundError as e:
+            error_msg = (
+                "LibreOffice not found. Please install LibreOffice from https://www.libreoffice.org/download/download/ "
+                "and make sure it's installed in one of the standard locations."
+            )
+            logger.error(error_msg)
+            raise HTTPException(status_code=500, detail=error_msg)
+        except Exception as e:
+            error_msg = f"Error during conversion: {str(e)}"
+            logger.error(error_msg)
+            raise HTTPException(status_code=500, detail=error_msg)
         
         # Get output file size
         output_size = os.path.getsize(output_path)
@@ -739,7 +794,6 @@ async def convert_powerpoint_to_pdf(file: UploadFile = File(...)):
             shutil.copyfileobj(file.file, buffer)
         
         try:
-            import subprocess
             import platform
             
             # Determine the LibreOffice command based on the platform
