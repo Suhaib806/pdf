@@ -15,6 +15,8 @@ import tempfile
 import zipfile
 from PIL import Image, ImageDraw, ImageFont
 import subprocess
+import asyncio  # Added asyncio import
+from PyPDF2 import PdfReader, PdfWriter
 
 # Try to import PIL but don't fail if it's not available
 try:
@@ -907,6 +909,510 @@ async def validate_powerpoint_file(file: UploadFile, max_size: int = MAX_FILE_SI
         content = await file.read(1024 * 1024)
     
     await file.seek(0)  # Reset file pointer for subsequent operations
+
+@app.post("/api/add-watermark")
+async def add_watermark(
+    file: UploadFile = File(...),
+    watermark_image: UploadFile = File(...),
+    opacity: float = Form(0.5),
+    position: str = Form("center"),
+    scale: float = Form(1.0)
+):
+    start_time = time.time()
+    
+    # Create a unique folder for this request
+    session_id = str(uuid4())
+    upload_dir = UPLOAD_DIR / session_id
+    result_dir = RESULT_DIR / session_id
+    upload_dir.mkdir(exist_ok=True)
+    result_dir.mkdir(exist_ok=True)
+    
+    try:
+        # Validate PDF file
+        await validate_pdf_file(file)
+        
+        # Save PDF file
+        pdf_path = upload_dir / file.filename
+        with open(pdf_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        # Save watermark image
+        watermark_path = upload_dir / watermark_image.filename
+        with open(watermark_path, "wb") as buffer:
+            shutil.copyfileobj(watermark_image.file, buffer)
+        
+        # Open the PDF
+        pdf_document = fitz.open(pdf_path)
+        
+        # Open and process the watermark image
+        watermark_img = Image.open(watermark_path)
+        
+        # Convert watermark to RGBA if it's not already
+        if watermark_img.mode != 'RGBA':
+            watermark_img = watermark_img.convert('RGBA')
+        
+        # Apply opacity
+        watermark_data = watermark_img.getdata()
+        new_data = []
+        for item in watermark_data:
+            # Adjust alpha channel based on opacity
+            new_data.append((item[0], item[1], item[2], int(item[3] * opacity)))
+        watermark_img.putdata(new_data)
+        
+        # Process each page
+        for page_num in range(len(pdf_document)):
+            page = pdf_document[page_num]
+            
+            # Get page dimensions
+            page_width = page.rect.width
+            page_height = page.rect.height
+            
+            # Calculate watermark dimensions
+            wm_width = int(watermark_img.width * scale)
+            wm_height = int(watermark_img.height * scale)
+            
+            # Calculate position
+            if position == "center":
+                x = (page_width - wm_width) / 2
+                y = (page_height - wm_height) / 2
+            elif position == "top-left":
+                x = 50
+                y = 50
+            elif position == "top-right":
+                x = page_width - wm_width - 50
+                y = 50
+            elif position == "bottom-left":
+                x = 50
+                y = page_height - wm_height - 50
+            elif position == "bottom-right":
+                x = page_width - wm_width - 50
+                y = page_height - wm_height - 50
+            else:  # default to center
+                x = (page_width - wm_width) / 2
+                y = (page_height - wm_height) / 2
+            
+            # Convert watermark to bytes
+            watermark_bytes = io.BytesIO()
+            watermark_img.save(watermark_bytes, format='PNG')
+            watermark_bytes.seek(0)
+            
+            # Insert watermark
+            page.insert_image(fitz.Rect(x, y, x + wm_width, y + wm_height), stream=watermark_bytes.getvalue())
+        
+        # Save the result
+        output_path = result_dir / "watermarked.pdf"
+        pdf_document.save(str(output_path))
+        pdf_document.close()
+        
+        # Get output file size
+        output_size = os.path.getsize(output_path)
+        
+        elapsed_time = time.time() - start_time
+        logger.info(f"Watermark added in {elapsed_time:.2f}s, output size: {output_size / (1024 * 1024):.2f}MB")
+        
+        return {
+            "message": "Watermark added successfully",
+            "file_path": str(output_path),
+            "session_id": session_id,
+            "output_size": output_size,
+            "processing_time": elapsed_time
+        }
+        
+    except Exception as e:
+        logger.error(f"Error adding watermark: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # Clean up
+        try:
+            if upload_dir.exists():
+                for file in upload_dir.glob("*"):
+                    try:
+                        file.unlink()
+                    except:
+                        pass
+                upload_dir.rmdir()
+        except Exception as e:
+            logger.error(f"Error cleaning up: {str(e)}")
+
+@app.post("/api/compress-pdf")
+async def compress_pdf(
+    file: UploadFile = File(...),
+    quality: str = Form("medium")
+):
+    start_time = time.time()
+    
+    if not file.filename.lower().endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="Only PDF files are allowed")
+    
+    # Create a unique folder for this request
+    session_id = str(uuid4())
+    upload_dir = UPLOAD_DIR / session_id
+    result_dir = RESULT_DIR / session_id
+    upload_dir.mkdir(exist_ok=True)
+    result_dir.mkdir(exist_ok=True)
+    
+    file_path = upload_dir / file.filename
+    
+    try:
+        # Validate and save uploaded file
+        await validate_pdf_file(file)
+        
+        # Save uploaded file
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        # Enhanced compression quality settings with better ratios
+        quality_map = {
+            "low": {
+                "image_quality": 15,
+                "image_dpi": 72,
+                "downsample_threshold": 150,
+                "compress_images": True,
+                "compress_fonts": True,
+                "cleanup": True
+            },
+            "medium": {
+                "image_quality": 30,
+                "image_dpi": 100,
+                "downsample_threshold": 200,
+                "compress_images": True,
+                "compress_fonts": True,
+                "cleanup": True
+            },
+            "high": {
+                "image_quality": 60,
+                "image_dpi": 150,
+                "downsample_threshold": 300,
+                "compress_images": True,
+                "compress_fonts": True,
+                "cleanup": True
+            }
+        }
+        compression_settings = quality_map.get(quality, quality_map["medium"])
+        
+        # Create output PDF with a different name
+        output_filename = f"compressed_{session_id}.pdf"
+        output_path = result_dir / output_filename
+        
+        # Open the PDF with PyMuPDF
+        doc = fitz.open(file_path)
+        
+        # Process each page
+        for page in doc:
+            # Get all images on the page
+            image_list = page.get_images(full=True)
+            
+            for img_index, img in enumerate(image_list):
+                try:
+                    xref = img[0]
+                    base_image = doc.extract_image(xref)
+                    image_bytes = base_image["image"]
+                    
+                    # Open image with PIL
+                    img_pil = Image.open(io.BytesIO(image_bytes))
+                    
+                    # Get image DPI if possible
+                    img_dpi = 300  # Default assumption
+                    if hasattr(img_pil, "info") and "dpi" in img_pil.info:
+                        img_dpi = img_pil.info["dpi"][0]
+                    
+                    # Skip if image is already small
+                    if len(image_bytes) < 10 * 1024:  # Skip images smaller than 10KB
+                        continue
+                    
+                    # Convert to RGB if necessary
+                    if img_pil.mode in ('RGBA', 'LA'):
+                        background = Image.new('RGB', img_pil.size, (255, 255, 255))
+                        background.paste(img_pil, mask=img_pil.split()[-1])
+                        img_pil = background
+                    elif img_pil.mode != 'RGB' and img_pil.mode != 'L':
+                        img_pil = img_pil.convert('RGB')
+                    
+                    # Calculate new dimensions based on DPI target
+                    if img_dpi > compression_settings["downsample_threshold"]:
+                        scale_factor = compression_settings["image_dpi"] / img_dpi
+                        if scale_factor < 0.9:  # Only resize if reduction is meaningful
+                            new_width = max(1, int(img_pil.width * scale_factor))
+                            new_height = max(1, int(img_pil.height * scale_factor))
+                            img_pil = img_pil.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                    
+                    # Save with compression
+                    output_buffer = io.BytesIO()
+                    
+                    # Choose optimal format based on image type
+                    if img_pil.mode == 'L':  # Grayscale image
+                        img_pil.save(
+                            output_buffer,
+                            format='PNG',
+                            optimize=True
+                        )
+                    else:
+                        # Use better compression for photographic images
+                        img_pil.save(
+                            output_buffer,
+                            format='JPEG',
+                            quality=compression_settings["image_quality"],
+                            optimize=True,
+                            progressive=True
+                        )
+                    
+                    # Only replace if actually smaller
+                    new_image_bytes = output_buffer.getvalue()
+                    if len(new_image_bytes) < len(image_bytes):
+                        # Replace the image in the PDF
+                        doc.update_stream(xref, new_image_bytes)
+                        logger.debug(f"Image compressed: {len(image_bytes)/1024:.1f}KB → {len(new_image_bytes)/1024:.1f}KB")
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to compress image on page {page.number}, index {img_index}: {str(e)}")
+                    continue
+        
+        # Apply additional optimizations
+        if compression_settings["cleanup"]:
+            # Use built-in optimization options
+            pass
+        
+        # Save with maximum compression
+        doc.save(
+            output_path,
+            garbage=4,  # Maximum garbage collection
+            deflate=True,  # Use deflate compression
+            clean=True,  # Clean redundant elements
+            pretty=False,  # Don't pretty print (saves space)
+            linear=True  # Optimize for web viewing
+        )
+        
+        # Close the document
+        doc.close()
+        
+        # Get output file size
+        original_size = os.path.getsize(file_path)
+        output_size = os.path.getsize(output_path)
+        compression_ratio = original_size / output_size if output_size > 0 else 1
+        
+        elapsed_time = time.time() - start_time
+        logger.info(f"PDF compression completed in {elapsed_time:.2f}s, original: {original_size / (1024 * 1024):.2f}MB, "
+                    f"output: {output_size / (1024 * 1024):.2f}MB, ratio: {compression_ratio:.2f}x")
+        
+        # Return response with more detailed information
+        response = {
+            "message": "PDF compressed successfully",
+            "file_path": output_filename,
+            "session_id": session_id,
+            "original_size": original_size,
+            "output_size": output_size,
+            "compression_ratio": compression_ratio,
+            "processing_time": elapsed_time
+        }
+        logger.info(f"Compression response: {response}")
+        return response
+        
+    except Exception as e:
+        logger.error(f"Error compressing PDF: {str(e)}", exc_info=True)
+        
+        # Clean up
+        try:
+            if upload_dir.exists():
+                for file in upload_dir.glob("*"):
+                    try:
+                        file.unlink()
+                    except:
+                        pass
+                upload_dir.rmdir()
+            if result_dir.exists():
+                for file in result_dir.glob("*"):
+                    try:
+                        file.unlink()
+                    except:
+                        pass
+                result_dir.rmdir()
+        except:
+            pass
+        
+        raise HTTPException(status_code=500, detail=f"Error compressing PDF: {str(e)}")
+
+@app.post("/api/unlock-pdf")
+async def unlock_pdf(file: UploadFile = File(...)):
+    start_time = time.time()
+    if not file.filename.lower().endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="Only PDF files are allowed")
+    session_id = str(uuid4())
+    upload_dir = UPLOAD_DIR / session_id
+    result_dir = RESULT_DIR / session_id
+    upload_dir.mkdir(exist_ok=True)
+    result_dir.mkdir(exist_ok=True)
+    file_path = upload_dir / file.filename
+
+    try:
+        await validate_pdf_file(file)
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        # Try to unlock with common passwords and empty password
+        common_passwords = ["", "1234", "12345", "password", "owner", "user", "secret", "admin", "userpass", "ownerpass"]
+        unlocked = False
+        output_path = None
+
+        # First try with PyMuPDF as it's more powerful
+        try:
+            import fitz  # PyMuPDF
+            doc = fitz.open(file_path)
+            
+            if doc.is_encrypted:
+                # Try to authenticate with empty password first
+                if doc.authenticate(""):
+                    # Create a new document without encryption
+                    new_doc = fitz.open()
+                    new_doc.insert_pdf(doc)
+                    
+                    output_filename = f"unlocked_{session_id}.pdf"
+                    output_path = result_dir / output_filename
+                    
+                    # Save without encryption
+                    new_doc.save(
+                        output_path,
+                        garbage=4,
+                        deflate=True,
+                        clean=True,
+                        pretty=False,
+                        linear=True
+                    )
+                    
+                    # Close documents
+                    new_doc.close()
+                    doc.close()
+                    
+                    # Verify the new PDF is readable
+                    test_doc = fitz.open(output_path)
+                    if not test_doc.is_encrypted:
+                        unlocked = True
+                    test_doc.close()
+                else:
+                    # Try common passwords
+                    for pwd in common_passwords:
+                        if doc.authenticate(pwd):
+                            # Create a new document without encryption
+                            new_doc = fitz.open()
+                            new_doc.insert_pdf(doc)
+                            
+                            output_filename = f"unlocked_{session_id}.pdf"
+                            output_path = result_dir / output_filename
+                            
+                            # Save without encryption
+                            new_doc.save(
+                                output_path,
+                                garbage=4,
+                                deflate=True,
+                                clean=True,
+                                pretty=False,
+                                linear=True
+                            )
+                            
+                            # Close documents
+                            new_doc.close()
+                            doc.close()
+                            
+                            # Verify the new PDF is readable
+                            test_doc = fitz.open(output_path)
+                            if not test_doc.is_encrypted:
+                                unlocked = True
+                            test_doc.close()
+                            break
+            else:
+                # PDF is not encrypted, just copy it
+                output_filename = f"unlocked_{session_id}.pdf"
+                output_path = result_dir / output_filename
+                doc.save(output_path)
+                doc.close()
+                unlocked = True
+
+        except Exception as e:
+            logger.warning(f"Failed to unlock with PyMuPDF: {str(e)}")
+            # If PyMuPDF fails, try PyPDF2 as fallback
+            try:
+                with open(file_path, "rb") as f:
+                    reader = PdfReader(f)
+                    if reader.is_encrypted:
+                        # Try common passwords
+                        for pwd in common_passwords:
+                            if reader.decrypt(pwd) == 1:
+                                pdf_writer = PdfWriter()
+                                for page in reader.pages:
+                                    pdf_writer.add_page(page)
+                                
+                                output_filename = f"unlocked_{session_id}.pdf"
+                                output_path = result_dir / output_filename
+                                with open(output_path, "wb") as output_file:
+                                    pdf_writer.write(output_file)
+                                unlocked = True
+                                break
+                    else:
+                        # PDF is not encrypted, just copy it
+                        output_filename = f"unlocked_{session_id}.pdf"
+                        output_path = result_dir / output_filename
+                        with open(output_path, "wb") as output_file:
+                            reader.write(output_file)
+                        unlocked = True
+            except Exception as e:
+                logger.warning(f"Failed to unlock with PyPDF2: {str(e)}")
+
+        if not unlocked:
+            # Clean up before raising the exception
+            try:
+                if upload_dir.exists():
+                    for file in upload_dir.glob("*"):
+                        try:
+                            file.unlink()
+                        except:
+                            pass
+                    upload_dir.rmdir()
+                if result_dir.exists():
+                    for file in result_dir.glob("*"):
+                        try:
+                            file.unlink()
+                        except:
+                            pass
+                    result_dir.rmdir()
+            except:
+                pass
+            raise HTTPException(
+                status_code=400,
+                detail="Unable to remove password protection from this PDF. The file may be using advanced encryption."
+            )
+
+        original_size = os.path.getsize(file_path)
+        output_size = os.path.getsize(output_path)
+        elapsed_time = time.time() - start_time
+        return {
+            "message": "PDF password removed successfully",
+            "file_path": output_path.name,
+            "session_id": session_id,
+            "original_size": original_size,
+            "output_size": output_size,
+            "processing_time": elapsed_time
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error removing PDF password: {str(e)}", exc_info=True)
+        try:
+            if upload_dir.exists():
+                for file in upload_dir.glob("*"):
+                    try:
+                        file.unlink()
+                    except:
+                        pass
+                upload_dir.rmdir()
+            if result_dir.exists():
+                for file in result_dir.glob("*"):
+                    try:
+                        file.unlink()
+                    except:
+                        pass
+                result_dir.rmdir()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Error removing PDF password: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
